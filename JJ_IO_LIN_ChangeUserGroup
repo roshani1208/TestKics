@@ -1,0 +1,184 @@
+---
+
+- wait_for_connection:
+    timeout: 5
+  register: ssh_conn
+  ignore_errors: yes
+  ignore_unreachable: yes
+
+#- wait_for_connection:
+#    timeout: 10
+#  register: ssh_conn
+#  #delegate_to: localhost
+
+- name: Debug SSH Connection
+  debug: var=ssh_conn
+
+- name: Setting Local Variables
+  set_fact:
+     user_name : "{{ item.user_name }}"
+     to_group : "{{ item.to_group }}"
+     from_group : "{{ item.from_group }}"
+     inventory : "{{ item.server }}"
+  delegate_to: localhost
+  become: false
+  ignore_errors: yes
+  with_items: "{{ configurations }}"
+
+- name: Set Fact Checking Host Connectivity
+  set_fact:
+    endstate: "Host {{ inventory }} is not reachable"
+    endstatus: "Warning"
+  delegate_to: localhost
+  when:
+    - ssh_conn is failed
+
+- name: Gathering Facts
+  setup:
+    gather_subset: '!all'
+  register: facts
+  ignore_errors: yes
+  when:
+    - ssh_conn is success
+
+- name: Gathering Facts for OS
+  set_fact: os_release= "{{ facts.ansible_facts.ansible_distribution }} {{ facts.ansible_facts.ansible_distribution_major_version }}"
+  when:
+    - ssh_conn is success
+  delegate_to: localhost
+  become: false
+  register: osrelease
+  ignore_errors: yes
+  when:
+    - ssh_conn is success
+
+- name: Group Creation for RHEL/Amazon2018/SUSE
+  become: yes
+  become_method: sudo
+  group:
+    name: "{{ to_group }}"
+  ignore_errors: yes
+  register: create_group_out
+  when:
+    - ssh_conn is success
+
+- name: Debug Group Creation for RHEL/Amazon2018/SUSE
+  debug: var=create_group_out
+
+- name: Remove Users from Existing Group
+  become: true
+  command: "gpasswd -d {{ user_name }} {{ from_group }}"
+  #user:
+     #name: "{{ user_name }}"
+     #groups: "{{ from_group }}"
+     #rem: yes
+  ignore_errors: yes
+  register: remove_user
+  when:
+    - ssh_conn is success
+
+- name: Debug Remove Users from Existing Group
+  debug: var=remove_user.rc
+
+- name: Setting fact when there is an error removing a user from the group
+  set_fact:
+     user_remove_error: "Error removing the user"
+     endstate: "Error removing the User: {{ user_name }} from Group: {{ from_group }} on the Host: {{ inventory }}"
+  when:
+    - ssh_conn is success
+    - remove_user.rc > 0
+
+- name: Add Users to Another Group
+  become: yes
+  become_method: sudo
+  #IDOP updatecommand: "gpasswd -a {{ user_name }} {{ to_group }}"
+  user:
+     name: "{{ user_name }}"
+     groups: "{{ to_group }}"
+     append: yes
+  register: add_user_to_group
+  ignore_errors: yes
+  when:
+    - ssh_conn is success
+    - user_remove_error is not defined
+    - remove_user.rc == 0
+
+- name: Debug Add Users to Another Group
+  debug: var=add_user_to_group
+  when:
+    - ssh_conn is success
+    - add_user_to_group is defined
+
+- name: Setting Facts failed to Add Users to Another Group
+  set_fact:
+    groupAdd_error: "Failed to add in the group"
+    endstate: "Failed to add the user {{ user_name }} in the Group {{ to_group }} on the host {{ inventory }}"
+  when:
+    - ssh_conn is success
+    - item.failed is defined
+    - item.failed == true
+    - add_user_to_group is defined
+  with_items: "{{ add_user_to_group.results }}"
+
+- name: Debug failed to Add Users to Another Group
+  debug: var=groupAdd_error
+  when:
+    - ssh_conn is success
+    - groupAdd_error is defined
+
+- name: Changing the Primary Group
+  become: yes
+  become_method: sudo
+  command: "usermod -g {{ to_group }} {{ user_name }}"
+  register: validate_output
+  ignore_errors: yes
+  when:
+    - ssh_conn is success
+    - user_remove_error is not defined
+    - groupAdd_error is not defined
+
+- name: Debug Changing the Primary Group
+  debug: var=validate_output
+  when:
+    - ssh_conn is success
+    - validate_output is defined
+
+- name: Setting Fact Success EndState
+  set_fact:
+     endstate: "The Group of the user {{ user_name }} on the host {{ inventory }} has been successfully changed from the Group {{ from_group }} to the Group {{ to_group }}"
+  ignore_errors: yes
+  when:
+    - ssh_conn is success
+    - user_remove_error is not defined
+    - groupAdd_error is not defined
+    - validate_output.changed is defined
+    - validate_output.rc == 0
+
+- name: Setting Fact Failed EndState
+  set_fact:
+     endstate: "The Group of the user {{ user_name }} on the host {{ inventory }} failed to change from the Group {{ from_group }} to the Group {{ to_group }}"
+  ignore_errors: yes
+  when:
+    - ssh_conn is success
+    - user_remove_error is defined
+    - groupAdd_error is defined
+    - validate_output.changed is defined
+    - validate_output.results.rc > 0
+
+- debug: var=endstate
+- debug: var=validate_output.changed
+
+- template:
+    src: change_group_adding_user.j2
+    dest: "/ansible_playbooks/workspace/Continuous_Integration/usecases/IDOPUSECASES/{{ job_name }}/reports/{{ job_name }}_{{ build_number }}_adding_user.json"
+  delegate_to: localhost
+  #run_once: true
+  ignore_errors: yes
+
+- name: Copying the result endstate in text file
+  copy:
+    content: "{{ endstate }}"
+    dest: "/ansible_playbooks/workspace/Continuous_Integration/usecases/IDOPUSECASES/{{ job_name }}/reports/{{ job_name }}_{{ build_number }}_result.txt"
+  delegate_to: localhost
+  run_once: true
+  ignore_errors: yes
